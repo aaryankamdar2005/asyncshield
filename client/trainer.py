@@ -17,7 +17,7 @@ SERVER_URL = "http://localhost:8000"
 CLIENT_ID = f"client-node-{random.randint(100, 999)}"
 
 # =========================================================
-# AUTONOMOUS DOWNLOAD: GET ARCHITECTURE BEFORE DOING ANYTHING
+# AUTONOMOUS DOWNLOAD: GET ARCHITECTURE
 # =========================================================
 print(f"[{CLIENT_ID}] Requesting model architecture from server...")
 response = requests.get(f"{SERVER_URL}/download_architecture")
@@ -27,18 +27,19 @@ if response.status_code == 200:
         f.write(response.content)
     print(f"[{CLIENT_ID}] Successfully downloaded architecture (models.py).")
 else:
-    print(f"[{CLIENT_ID}] Failed to download architecture. Server offline?")
+    print(f"[{CLIENT_ID}] Failed to download architecture.")
     sys.exit(1)
 
-# Now it is safe to import because we just downloaded it!
-from models import SimpleCNN, restore_1d_to_model
+from models import RobustCNN, restore_1d_to_model
 # =========================================================
 
 def fetch_global_model():
     print(f"[{CLIENT_ID}] Fetching latest global weights...")
     response = requests.get(f"{SERVER_URL}/get_model")
     data = response.json()
-    global_1d = np.zeros(100000) 
+    
+    # FIX: Use the actual weights from the server, not zeros!
+    global_1d = np.array(data["weights"]) 
     return global_1d, data["version"]
 
 def train_local(global_1d):
@@ -48,10 +49,11 @@ def train_local(global_1d):
     
     subset_indices = random.sample(range(len(dataset)), 2000)
     subset = torch.utils.data.Subset(dataset, subset_indices)
-    dataloader = DataLoader(subset, batch_size=32, drop_last=True) # drop_last required by Opacus
+    dataloader = DataLoader(subset, batch_size=32, drop_last=True)
 
     print(f"[{CLIENT_ID}] Setting up Model & Differential Privacy...")
-    model = SimpleCNN()
+    model = RobustCNN()
+    # Start training from the CURRENT global knowledge
     model = restore_1d_to_model(model, global_1d)
     
     optimizer = optim.SGD(model.parameters(), lr=0.01, momentum=0.5)
@@ -70,20 +72,27 @@ def train_local(global_1d):
         optimizer.step()
         
     print(f"[{CLIENT_ID}] Training complete. Flattening and Standardizing weights...")
-    standardizer = WeightStandardizer(target_size=100000)
+    standardizer = WeightStandardizer(target_size=500000)
+    
+    # Get the inner model from the Opacus wrapper
     clean_model = model._module if hasattr(model, '_module') else model
-    updated_1d = standardizer.process_model(clean_model)
+    
+    # FIX: Call 'universal_standardize' to match the new standardizer.py
+    updated_1d = standardizer.universal_standardize(clean_model)
     
     return updated_1d
 
 def submit_update(updated_1d, old_1d, current_version):
+    # Calculate the Delta (the change)
     weight_delta = updated_1d - old_1d
+    
+    # ZERO-TRUST PAYLOAD: accuracy_improvement is NOT sent by client anymore
     payload = {
         "client_id": CLIENT_ID,
         "client_version": current_version,
-        "weights_delta": weight_delta.tolist(), 
-        "accuracy_improvement": random.uniform(0.01, 0.05) 
+        "weights_delta": weight_delta.tolist()
     }
+    
     print(f"[{CLIENT_ID}] Pushing commit to Server Dashboard...")
     res = requests.post(f"{SERVER_URL}/submit_update", json=payload)
     print(f"[{CLIENT_ID}] Server Response:", res.json())

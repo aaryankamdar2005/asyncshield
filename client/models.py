@@ -1,45 +1,35 @@
-# server/models.py
+# models.py
 import torch
 import torch.nn as nn
-import numpy as np
+import torch.nn.functional as F
 
-class SimpleCNN(nn.Module):
+class RobustCNN(nn.Module):
     def __init__(self):
-        super(SimpleCNN, self).__init__()
-        # Shrunk down the channels to keep total parameters at ~54,000 
-        # (This easily fits inside our 100k limit array)
-        self.conv1 = nn.Conv2d(1, 8, kernel_size=5, padding=2)
-        self.relu1 = nn.ReLU()
-        self.pool1 = nn.MaxPool2d(2)
-        
-        self.conv2 = nn.Conv2d(8, 16, kernel_size=5, padding=2)
-        self.relu2 = nn.ReLU()
-        self.pool2 = nn.MaxPool2d(2)
-        
-        # 16 channels * 7 * 7 spatial grid = 784
-        self.fc1 = nn.Linear(784, 64)
-        self.relu3 = nn.ReLU()
-        self.fc2 = nn.Linear(64, 10)
+        super(RobustCNN, self).__init__()
+        self.conv1 = nn.Conv2d(1, 32, kernel_size=3, padding=1)
+        self.conv2 = nn.Conv2d(32, 64, kernel_size=3, padding=1)
+        self.dropout = nn.Dropout(0.25)
+        self.fc1 = nn.Linear(64 * 7 * 7, 128)
+        self.fc2 = nn.Linear(128, 10)
 
     def forward(self, x):
-        x = self.pool1(self.relu1(self.conv1(x)))
-        x = self.pool2(self.relu2(self.conv2(x)))
-        x = x.view(x.size(0), -1)
-        x = self.relu3(self.fc1(x))
+        x = F.relu(self.conv1(x))
+        x = F.max_pool2d(x, 2)
+        x = F.relu(self.conv2(x))
+        x = F.max_pool2d(x, 2)
+        x = self.dropout(x)
+        x = torch.flatten(x, 1)
+        x = F.relu(self.fc1(x))
         x = self.fc2(x)
         return x
 
-def restore_1d_to_model(model: nn.Module, flat_weights_1d: np.ndarray):
-    """Injects exactly the required parameters from the 100k 1D array back into the PyTorch model."""
+def restore_1d_to_model(model, weights_1d):
     state_dict = model.state_dict()
-    offset = 0
-    
-    for key, tensor in state_dict.items():
-        numel = tensor.numel()
-        layer_flat = flat_weights_1d[offset : offset + numel]
-        layer_tensor = torch.from_numpy(layer_flat).view_as(tensor).float()
-        state_dict[key].copy_(layer_tensor)
-        offset += numel
-        
+    pointer = 0
+    for key in sorted(state_dict.keys()):
+        num_params = state_dict[key].numel()
+        layer_weights = weights_1d[pointer : pointer + num_params]
+        state_dict[key] = torch.from_numpy(layer_weights).reshape(state_dict[key].shape)
+        pointer += num_params
     model.load_state_dict(state_dict)
     return model

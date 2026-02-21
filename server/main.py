@@ -9,10 +9,10 @@ import os
 
 from aggregator import RobustAggregator
 from database import AsyncDatabase
+from evaluator import Evaluator  # Imported the Zero-Trust Judge
 
 app = FastAPI()
 
-# Allow Next.js dashboard to talk to FastAPI
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["http://localhost:3000"],
@@ -21,31 +21,24 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Initialize Real Database and Aggregator
 db = AsyncDatabase("asyncshield.db")
 aggregator = RobustAggregator()
+evaluator = Evaluator() # Secret golden set loaded here
 
-global_model_weights = np.zeros(100000) 
+global_model_weights = np.zeros(500000) 
 global_version = 1
 
+# ZERO-TRUST: accuracy_improvement is REMOVED from the payload.
 class UpdatePayload(BaseModel):
     client_id: str
     client_version: int
     weights_delta: List[float] 
-    accuracy_improvement: float
-
-@app.get("/download_architecture")
-def download_architecture():
-    """Allows autonomous clients to download the PyTorch model architecture on the fly."""
-    file_path = "models.py"
-    if os.path.exists(file_path):
-        return FileResponse(file_path, media_type="text/x-python", filename="models.py")
-    return {"error": "Architecture file not found on server."}
 
 @app.get("/get_model")
 def get_model():
     return {
         "version": global_version,
+        "weights": global_model_weights.tolist(),
         "message": "Model ready for download"
     }
 
@@ -53,45 +46,74 @@ def get_model():
 def submit_update(payload: UpdatePayload):
     global global_model_weights, global_version
     
-    # 1. Evaluate accuracy (The Win Condition)
-    if payload.accuracy_improvement < -0.05:
-        db.add_commit(
-            client_id=payload.client_id,
-            status="Rejected ❌",
-            reason="Data Poisoning / Poor Accuracy Detected",
-            version_bump="None",
-            bounty=0
-        )
-        return {"status": "rejected", "message": "Update failed accuracy checks."}
+    delta = np.array(payload.weights_delta)
+    
+    # 1. ZERO-TRUST EVALUATION
+    real_delta_i, current_accuracy = evaluator.verify_update(global_model_weights, delta)
+    
+    # DEBUG LOG
+    print(f"[EVAL] Client: {payload.client_id} | Real ΔI: {real_delta_i*100:.4f}% | Acc: {current_accuracy*100:.2f}%")
+    
+    # --- NEW STRICTER LOGIC ---
 
-    # 2. Process via Aggregator
-    client_weights = np.array(payload.weights_delta)
+    # A: Tighten threshold to -1.5% (0.015). 
+    # This is enough for DP noise but blocks bad architectures (like the MLP).
+    if real_delta_i < -0.015:
+        print(f"[Server] REJECTED: Accuracy drop too high ({real_delta_i*100:.2f}%)")
+        db.add_commit(
+            payload.client_id, 
+            "Rejected ❌", 
+            f"Zero-Trust Failure: Accuracy dropped by {abs(real_delta_i*100):.1f}%", 
+            "None", 
+            0
+        )
+        return {"status": "rejected", "message": "Zero-Trust: Quality too low."}
+
+    # B: ONLY Merge if the improvement is non-negative
+    # We don't want the "Global Brain" to get dumber.
+    if real_delta_i <= 0:
+        db.add_commit(payload.client_id, "Rejected ❌", "No measurable improvement", "None", 0)
+        return {"status": "rejected", "message": "Update did not improve the model."}
+
+    # 2. ROBUST ASYNC AGGREGATION (Only reached if improvement > 0)
     global_model_weights = aggregator.apply_update(
-        w_old=global_model_weights,
-        w_client=client_weights,
-        global_vers=global_version,
-        client_vers=payload.client_version
+        global_model_weights, 
+        delta, 
+        global_version, 
+        payload.client_version
     )
     
-    # 3. Accept Update & Pay Bounty
+    # 3. VERSION BUMP & BOUNTY
     old_version = global_version
     global_version += 1
-    bounty_earned = max(0, int(payload.accuracy_improvement * 1000))
+    
+    # Only pay if they actually improved the model
+    # (5 base tokens + 10,000x the gain)
+    bounty_earned = 5 + int(real_delta_i * 10000)
     
     db.add_commit(
-        client_id=payload.client_id,
-        status="Merged ✅",
-        reason=f"Improved accuracy by {payload.accuracy_improvement:.3f}",
-        version_bump=f"v{old_version} -> v{global_version}",
-        bounty=bounty_earned
+        payload.client_id, 
+        "Merged ✅", 
+        f"Real Improvement: {real_delta_i*100:.3f}% | New Acc: {current_accuracy*100:.1f}%", 
+        f"v{old_version}->v{global_version}", 
+        bounty_earned
     )
 
-    return {"status": "success", "bounty_earned": bounty_earned, "new_version": global_version}
-
+    return {
+        "status": "success", 
+        "bounty_earned": bounty_earned, 
+        "new_version": global_version
+    }
 @app.get("/dashboard_data")
 def get_dashboard_data():
-    """Endpoint for Next.js frontend to fetch live data from SQLite."""
     return {
         "global_version": global_version,
         **db.get_dashboard_data()
     }
+
+@app.get("/download_architecture")
+def download_architecture():
+    file_path = "models.py"
+    if os.path.exists(file_path):
+        return FileResponse(file_path, media_type="text/x-python", filename="models.py")
+    return {"error": "Architecture file not found on server."}
