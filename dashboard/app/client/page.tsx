@@ -1,95 +1,91 @@
-// app/client/page.tsx
 "use client";
 import { useEffect, useState } from "react";
-import { Search, UploadCloud, Coins } from "lucide-react";
+import { Search, UploadCloud, Coins, Loader2, CheckCircle, XCircle } from "lucide-react";
 
 export default function ClientDashboard() {
   const [repos, setRepos] = useState<any[]>([]);
   const [selectedRepo, setSelectedRepo] = useState<string | null>(null);
   const [file, setFile] = useState<File | null>(null);
+  const [isProcessing, setIsProcessing] = useState(false);
 
   useEffect(() => {
-    // Fetch available repos from server
-    fetch("http://localhost:8000/repos")
-      .then(res => res.json())
-      .then(data => setRepos(data));
+    fetch("http://localhost:8000/repos").then(res => res.json()).then(data => setRepos(data));
   }, []);
 
   const handleUpload = async () => {
-    if (!selectedRepo || !file) return alert("Select a repo and a file!");
+    if (!selectedRepo || !file) return alert("Select a repo and a .pth file!");
     
+    setIsProcessing(true);
     const formData = new FormData();
-    formData.append("client_id", "Contributor_99");
+    formData.append("client_id", "Web_Node_77"); // Fixed ID for demo
     formData.append("client_version", "1");
     formData.append("file", file);
 
-    const res = await fetch(`http://localhost:8000/repos/${selectedRepo}/submit_update`, {
-      method: "POST",
-      body: formData
-    });
-    const data = await res.json();
-    alert(`Status: ${data.status} | Bounty: ${data.bounty || 0} 🪙`);
+    try {
+      const res = await fetch(`http://localhost:8000/repos/${selectedRepo}/submit_update`, {
+        method: "POST",
+        body: formData
+      });
+      const data = await res.json();
+
+      if (data.status === "success") {
+        alert(`✅ MERGED! Bounty: ${data.bounty} Tokens. Version is now v${data.version}`);
+      } else {
+        alert(`❌ REJECTED: ${data.message}`);
+      }
+    } catch (err) {
+      alert("Network Error: Is the backend running?");
+    } finally {
+      setIsProcessing(false);
+    }
   };
 
   return (
-    <div className="min-h-screen bg-[#050505] text-white p-10 font-sans">
-      <header className="flex justify-between items-center mb-10 border-b border-white/10 pb-6">
-        <h1 className="text-3xl font-bold flex items-center gap-3">
-          <Coins className="text-yellow-400"/> Contributor Hub
-        </h1>
-        <div className="px-4 py-2 bg-yellow-500/20 border border-yellow-500/30 rounded-full text-yellow-400 font-bold flex gap-2">
-          Your Bounty Balance: <span>120 🪙</span>
+    <div className="min-h-screen bg-[#020202] text-white p-10 font-mono">
+      <header className="flex justify-between items-center mb-12 border-b border-white/5 pb-8">
+        <h1 className="text-2xl font-bold tracking-tighter text-indigo-400">ASYNC-SHIELD // CONTRIBUTOR_PORTAL</h1>
+        <div className="bg-yellow-500/10 border border-yellow-500/20 px-6 py-2 rounded-full text-yellow-500 font-bold flex gap-2 items-center">
+          <Coins size={18}/> Balance: <span>450 TOKENS</span>
         </div>
       </header>
 
-      {/* SEARCH AND REPO LIST */}
-      <div className="mb-8">
-        <div className="relative max-w-md mb-6">
-          <Search className="absolute left-3 top-2.5 text-gray-400" size={18}/>
-          <input 
-            type="text" 
-            placeholder="Search open repositories..." 
-            className="w-full bg-white/5 border border-white/20 rounded-full py-2 pl-10 pr-4 text-white focus:outline-none focus:border-indigo-500"
-          />
-        </div>
-
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
-          {repos.map(repo => (
-            <div 
-              key={repo.id} 
-              onClick={() => setSelectedRepo(repo.id)}
-              className={`p-5 rounded-xl border cursor-pointer transition-all ${selectedRepo === repo.id ? 'bg-indigo-900/40 border-indigo-400' : 'bg-white/5 border-white/10 hover:border-white/30'}`}
-            >
-              <h3 className="font-bold text-lg">{repo.name}</h3>
-              <p className="text-sm text-gray-400 mt-1">{repo.description}</p>
-              <div className="mt-4 flex justify-between items-center text-xs text-gray-500">
-                <span>Owner: {repo.owner}</span>
-                <span className="bg-green-900/50 text-green-400 px-2 py-1 rounded">v{repo.version}</span>
-              </div>
+      {/* REPO SELECTOR */}
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-6 mb-12">
+        {repos.map(repo => (
+          <div 
+            key={repo.id} onClick={() => setSelectedRepo(repo.id)}
+            className={`p-6 rounded-2xl border transition-all cursor-pointer ${selectedRepo === repo.id ? 'bg-indigo-600/20 border-indigo-500 ring-1 ring-indigo-500' : 'bg-white/5 border-white/10 hover:border-white/20'}`}
+          >
+            <h3 className="font-bold text-white mb-1">{repo.name}</h3>
+            <p className="text-xs text-gray-500 mb-4 h-8 overflow-hidden">{repo.description}</p>
+            <div className="flex justify-between text-[10px] uppercase font-bold tracking-widest text-gray-400">
+              <span>v{repo.version}</span>
+              <span className="text-indigo-400">ID: {repo.id}</span>
             </div>
-          ))}
-        </div>
+          </div>
+        ))}
       </div>
 
-      {/* UPLOAD PANEL (Only shows if a repo is selected) */}
+      {/* UPLOAD ZONE */}
       {selectedRepo && (
-        <div className="bg-indigo-950/20 p-8 rounded-xl border border-indigo-500/30 text-center max-w-2xl mx-auto mt-10">
-          <UploadCloud className="mx-auto text-indigo-400 mb-4" size={48}/>
-          <h2 className="text-2xl font-bold mb-2">Submit Model Update</h2>
-          <p className="text-gray-400 mb-6">Upload your locally trained weights (.json format) for Repo ID: {selectedRepo}</p>
+        <div className="max-w-xl mx-auto bg-white/[0.02] border border-white/10 p-10 rounded-3xl text-center">
+          <UploadCloud size={48} className="mx-auto text-gray-500 mb-6"/>
+          <h2 className="text-xl font-bold mb-2">Submit .pth Commit</h2>
+          <p className="text-sm text-gray-500 mb-8">Upload binary weights for validation against the Golden Set.</p>
           
           <input 
-            type="file" 
-            accept=".json"
+            type="file" accept=".pth"
             onChange={(e) => setFile(e.target.files?.[0] || null)}
-            className="block w-full text-sm text-gray-400 file:mr-4 file:py-2 file:px-4 file:rounded-full file:border-0 file:bg-indigo-500 file:text-white hover:file:bg-indigo-600 cursor-pointer mx-auto max-w-xs mb-6"
+            className="block w-full text-xs text-gray-500 mb-8 file:mr-4 file:py-2 file:px-4 file:rounded-full file:border-0 file:bg-indigo-600 file:text-white hover:file:bg-indigo-500 cursor-pointer"
           />
-          
+
           <button 
-            onClick={handleUpload}
-            className="px-8 py-3 bg-indigo-600 hover:bg-indigo-500 rounded font-bold w-full max-w-xs transition-colors"
+            onClick={handleUpload} disabled={isProcessing}
+            className={`w-full py-4 rounded-xl font-bold transition-all flex items-center justify-center gap-3 ${isProcessing ? 'bg-gray-800 text-gray-500' : 'bg-indigo-600 hover:bg-indigo-500 text-white'}`}
           >
-            Submit Commit & Claim Bounty
+            {isProcessing ? (
+                <><Loader2 className="animate-spin" size={20}/> VERIFYING ZERO-TRUST...</>
+            ) : "PUSH TO GLOBAL BRAIN"}
           </button>
         </div>
       )}

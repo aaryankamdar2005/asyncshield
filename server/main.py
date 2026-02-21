@@ -9,7 +9,10 @@ import json
 import uuid
 import os
 import torch
-
+import io
+import torch
+import json
+from fastapi import FastAPI, UploadFile, File, Form, HTTPException
 from aggregator import RobustAggregator
 from database import AsyncDatabase
 from evaluator import Evaluator  
@@ -94,62 +97,70 @@ async def submit_repo_update(
     client_version: int = Form(...), 
     file: UploadFile = File(...)
 ):
-    print(f"\n[RECEIVED] Commit attempt for Repo: {repo_id} from {client_id}")
+    print(f"\n[BINARY-UPLOAD] Request for Repo: {repo_id} from {client_id}")
 
-    # 1. Memory Safety
+    # 1. Memory Safety: Ensure weights exist for this repo
     if repo_id not in repo_weights_store:
         repo_weights_store[repo_id] = get_initial_weights(RobustCNN())
 
-    # 2. Parse the JSON File
+    # 2. Read and Parse .pth Binary File
     try:
         contents = await file.read()
-        data = json.loads(contents)
-        delta = np.array(data["weights_delta"])
-    except Exception as e:
-        print(f"[ERROR] JSON Parse Failed: {e}")
-        return {"status": "error", "message": "Invalid JSON format. Weights not found."}
+        buffer = io.BytesIO(contents)
+        
+        # Load the torch file (map to CPU to avoid GPU errors)
+        data = torch.load(buffer, map_location=torch.device('cpu'))
+        
+        # Extract the delta (handles both raw tensor or dictionary format)
+        if isinstance(data, dict) and "weights_delta" in data:
+            delta = data["weights_delta"].numpy()
+        else:
+            delta = data.numpy() if hasattr(data, 'numpy') else np.array(data)
 
-    # 3. ZERO-TRUST EVALUATION
+        print(f"[DEBUG] Loaded binary weights. Size: {len(delta)}")
+        
+    except Exception as e:
+        print(f"[ERROR] .pth Parse Failed: {e}")
+        return {"status": "error", "message": "The file is not a valid .pth PyTorch file."}
+
+    # 3. Validate Dimensions
+    if len(delta) != MAX_WEIGHTS:
+        return {"status": "error", "message": f"Dim mismatch. Expected {MAX_WEIGHTS}, got {len(delta)}"}
+
+    # 4. ZERO-TRUST EVALUATION
     global_weights = repo_weights_store[repo_id]
     real_delta_i, current_accuracy = evaluator.verify_update(global_weights, delta)
     
-    print(f"[EVAL] ΔI: {real_delta_i*100:.4f}% | Target Acc: {current_accuracy*100:.2f}%")
+    print(f"[EVAL] Result for {client_id} -> ΔI: {real_delta_i*100:.4f}%")
 
-    # FRAUD DETECTION: If accuracy drops by > 1.5%
+    # 5. REJECTION LOGIC (Fraud & Quality)
     if real_delta_i < -0.015:
         db.add_commit(repo_id, client_id, "Rejected ❌", f"Fraud: Acc drop {abs(real_delta_i*100):.1f}%", "None", 0)
-        return {"status": "rejected", "message": "Model poisoning detected by Zero-Trust."}
+        return {"status": "rejected", "message": "Model poisoning detected."}
 
-    # QUALITY GATE: If accuracy didn't improve at all
     if real_delta_i <= 0:
-        db.add_commit(repo_id, client_id, "Rejected ❌", "No measurable improvement", "None", 0)
-        return {"status": "rejected", "message": "Update did not improve model."}
+        db.add_commit(repo_id, client_id, "Rejected ❌", "No accuracy improvement", "None", 0)
+        return {"status": "rejected", "message": "Your update did not improve the model."}
 
-    # 4. MATH: ADAPTIVE ASYNC AGGREGATION
+    # 6. CALCULATE TRUST & MERGE
     repos = db.get_all_repos()
     current_repo_v = next((r for r in repos if r['id'] == repo_id))['version']
     
-    # Staleness + Intelligence Boost
     base_alpha = aggregator.calculate_staleness(current_repo_v, client_version)
     intel_boost = max(0, real_delta_i * 2.0)
     adaptive_trust = min(1.0, base_alpha + intel_boost)
 
-    # 5. MERGE TO GLOBAL BRAIN
+    # Apply Weights Update: W_new = W_old + (LR * Trust) * Delta
     repo_weights_store[repo_id] = global_weights + (aggregator.lr * adaptive_trust) * delta
     
-    # Update Version and Bounty
+    # Update DB and Versioning
     new_version = current_repo_v + 1
     db.update_repo_version(repo_id, new_version)
+    
     bounty = 5 + int(real_delta_i * 10000)
+    db.add_commit(repo_id, client_id, "Merged ✅", f"Imp: {real_delta_i*100:.2f}% | Trust: {adaptive_trust:.2f}", f"v{current_repo_v}->v{new_version}", bounty)
 
-    # Log GitHub-style Commit
-    db.add_commit(
-        repo_id, client_id, "Merged ✅", 
-        f"Verified Improvement: {real_delta_i*100:.2f}%", 
-        f"v{current_repo_v}->v{new_version}", bounty
-    )
-
-    print(f"[SUCCESS] Repo {repo_id} updated. Bounty: {bounty}")
+    print(f"[SUCCESS] Repo {repo_id} upgraded to v{new_version}")
     return {"status": "success", "bounty": bounty, "version": new_version}
 
 # --- DASHBOARD & UTILS ---
